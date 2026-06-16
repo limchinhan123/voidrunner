@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
+<title>Touch the Stars</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;500&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0a1a;font-family:'Cormorant Garamond',serif;color:#ddd}
+canvas{display:block;position:fixed;top:0;left:0;touch-action:none}
+#intro{
+  position:fixed;inset:0;z-index:100;
+  background:radial-gradient(ellipse at center,#1a1a3e 0%,#0a0a1a 70%);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  transition:opacity 1.2s ease,visibility 1.2s;
+}
+#intro.gone{opacity:0;visibility:hidden;pointer-events:none}
+#intro h1{
+  font-weight:300;font-size:clamp(28px,7vw,56px);letter-spacing:.25em;
+  color:#fff;text-shadow:0 0 30px rgba(180,200,255,0.8);
+  animation:titleBreath 3s ease-in-out infinite;
+}
+#intro p{margin-top:16px;color:#8899bb;font-size:clamp(14px,3vw,22px);letter-spacing:.3em}
+#intro .tap{
+  margin-top:50px;padding:18px 50px;border:1px solid rgba(180,200,255,0.4);
+  background:rgba(255,255,255,0.04);color:#ccddf8;
+  font-family:inherit;font-size:18px;letter-spacing:.3em;
+  cursor:pointer;border-radius:60px;backdrop-filter:blur(8px);
+  animation:hintGlow 2s ease-in-out infinite;transition:all .3s;
+}
+#intro .tap:hover{background:rgba(255,255,255,0.1);border-color:rgba(180,200,255,0.8)}
+@keyframes titleBreath{0%,100%{opacity:.85;filter:blur(0)}50%{opacity:1;filter:blur(0.5px)}}
+@keyframes hintGlow{0%,100%{box-shadow:0 0 20px rgba(180,200,255,0.2)}50%{box-shadow:0 0 40px rgba(180,200,255,0.5)}}
+#stats{
+  position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:50;
+  font-size:13px;color:#8899bb;letter-spacing:.2em;pointer-events:none;
+  text-align:center;opacity:.7;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="intro">
+  <h1>Touch the Stars</h1>
+  <p>A MAGICAL GARDEN FOR RAE</p>
+  <button class="tap" id="begin">TOUCH TO BEGIN</button>
+</div>
+
+<div id="stats" class="hidden">✦ <span id="count">0</span> stars planted</div>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, DPR;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = canvas.width = window.innerWidth * DPR;
+  H = canvas.height = window.innerHeight * DPR;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.scale(1, 1);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Utilities ──────────────────────────────────────────────────────
+const TAU = Math.PI * 2;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const rndInt = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const lerp = (a, b, t) => a + (b - a) * t;
+const col = (r, g, b, a = 1) => `rgba(${r|0},${g|0},${b|0},${a})`;
+
+function hsl2rgb(h, s, l) {
+  h = h % 360; s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+
+// ── Particle System ────────────────────────────────────────────────
+class Particle {
+  constructor(o) {
+    Object.assign(this, {
+      x: o.x, y: o.y,
+      vx: o.vx || 0, vy: o.vy || 0,
+      life: o.life || 1, maxLife: o.life || 1,
+      size: o.size || 3,
+      hue: o.hue || 220, sat: o.sat || 80, lit: o.lit || 70,
+      grav: o.grav || 0,
+      drag: o.drag || 1,
+      pulse: !!o.pulse, shrink: o.shrink !== false,
+    });
+    this.alive = true;
+  }
+  step(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.vy += this.grav * dt;
+    this.vx *= this.drag;
+    this.vy *= this.drag;
+    this.life -= dt;
+    if (this.life <= 0) this.alive = false;
+  }
+  draw() {
+    const fade = clamp(this.life / this.maxLife, 0, 1);
+    const s = this.shrink ? this.size * fade : this.size;
+    const { r, g, b } = hsl2rgb(this.hue, this.sat, this.lit);
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.shadowColor = `rgb(${r},${g},${b})`;
+    ctx.shadowBlur = s * 2 * fade;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, s, 0, TAU);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+}
+
+const particles = [];
+function emit(o) {
+  const n = o.n || 1;
+  for (let i = 0; i < n; i++) {
+    let vx, vy;
+    if (o.ring) {
+      const th = (i / n) * TAU;
+      const sp = o.speed * rnd(0.7, 1.1);
+      vx = Math.cos(th) * sp;
+      vy = Math.sin(th) * sp;
+    } else if (o.cone) {
+      const a = o.angle || -Math.PI / 2;
+      const spread = o.spread || 0.6;
+      const th = a + rnd(-spread, spread);
+      const sp = o.speed * rnd(0.5, 1);
+      vx = Math.cos(th) * sp;
+      vy = Math.sin(th) * sp;
+    } else if (o.up) {
+      vx = rnd(-o.speed, o.speed);
+      vy = rnd(-o.speed, -o.speed * 0.2);
+    } else {
+      vx = rnd(-o.speed, o.speed);
+      vy = rnd(-o.speed, o.speed);
+    }
+    particles.push(new Particle({
+      x: o.x, y: o.y, vx, vy,
+      life: o.life ? rnd(o.life[0], o.life[1]) : 0.9,
+      size: o.size ? rnd(o.size[0], o.size[1]) : 2.5,
+      hue: o.hue ?? rnd(o.hueR[0], o.hueR[1]),
+      sat: o.sat ?? 80, lit: o.lit ?? 70,
+      grav: o.grav || 0, drag: o.drag || 0.98,
+      pulse: !!o.pulse, shrink: o.shrink !== false,
+    }));
+  }
+}
+
+// ── Stars (background) ─────────────────────────────────────────────
+const stars = [];
+function initStars() {
+  stars.length = 0;
+  const n = Math.min(Math.floor(W * H / 6000), 300);
+  for (let i = 0; i < n; i++) {
+    stars.push({
+      x: rnd(0, W), y: rnd(0, H),
+      size: rnd(0.4, 1.8),
+      phase: rnd(0, TAU),
+      speed: rnd(0.5, 2),
+      bright: rnd(0.3, 1),
+    });
+  }
+}
+
+function drawStars(t) {
+  stars.forEach(s => {
+    const a = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * s.speed + s.phase));
+    ctx.globalAlpha = a * s.bright;
+    ctx.fillStyle = '#ddeeff';
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = s.size * 4;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size * DPR, 0, TAU);
+    ctx.fill();
+  });
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+// ── Fireflies ──────────────────────────────────────────────────────
+const fireflies = [];
+function initFireflies() {
+  fireflies.length = 0;
+  const n = Math.min(Math.floor(W * H / 40000), 20);
+  for (let i = 0; i < n; i++) {
+    fireflies.push({
+      x: rnd(0, W), y: rnd(0, H),
+      vx: rnd(-25, 25) * DPR, vy: rnd(-25, 25) * DPR,
+      phase: rnd(0, TAU), phase2: rnd(0, TAU),
+      hue: rnd(40, 70), size: rnd(2, 4) * DPR,
+    });
+  }
+}
+
+function drawFireflies(t) {
+  fireflies.forEach(f => {
+    const a = 0.3 + 0.7 * clamp(Math.sin(t * 2 + f.phase) * 1.1, 0, 1);
+    const hue = (f.hue + Math.sin(t * 0.7 + f.phase2) * 15) % 360;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = `hsl(${hue},90%,80%)`;
+    ctx.shadowColor = `hsl(${hue},100%,70%)`;
+    ctx.shadowBlur = f.size * 5;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, f.size, 0, TAU);
+    ctx.fill();
+  });
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+function updateFireflies(dt) {
+  fireflies.forEach(f => {
+    f.phase += dt * 0.5;
+    f.x += f.vx * dt + Math.sin(f.phase * 1.3) * 0.3;
+    f.y += f.vy * dt + Math.cos(f.phase * 1.7) * 0.3;
+    if (f.x < -50) f.x = W + 50;
+    if (f.x > W + 50) f.x = -50;
+    if (f.y < -50) f.y = H + 50;
+    if (f.y > H + 50) f.y = -50;
+  });
+}
+
+// ── Flowers ────────────────────────────────────────────────────────
+const flowers = [];
+class Flower {
+  constructor(x, y) {
+    // Snap to "ground" — bottom 30% of screen for desktop, bottom half for mobile
+    const groundRatio = W < 600 ? 0.55 : 0.72;
+    this.x = x;
+    this.baseY = Math.min(y, H - H * (1 - groundRatio));
+    this.hue = rnd(320, 380) % 360; // pinks/purples/blues
+    this.size = 0;
+    this.targetSize = rnd(22, 38) * DPR;
+    this.grow = 0; // 0..1 over ~1.5s
+    this.sway = rnd(0, TAU);
+    this.born = performance.now();
+    this.petals = rndInt(5, 8);
+    this.centerSize = rnd(5, 9) * DPR;
+  }
+  step(dt, t) {
+    this.grow = Math.min(1, this.grow + dt * 1.1);
+    this.sway += dt * 0.8;
+  }
+  draw(t) {
+    const s = this.grow;
+    if (s <= 0) return;
+    const ease = 1 - Math.pow(1 - s, 3); // ease out cubic
+    const h = this.targetSize * ease;
+    const { x, y } = this;
+    const sway = Math.sin(this.sway) * 3 * DPR * ease;
+
+    ctx.save();
+    ctx.translate(x + sway, this.baseY);
+
+    // Stem
+    ctx.strokeStyle = 'rgba(120,180,100,0.85)';
+    ctx.lineWidth = 2.5 * DPR;
+    ctx.shadowColor = 'rgba(100,200,100,0.5)';
+    ctx.shadowBlur = 6;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(sway * 0.3, -this.targetSize * 0.6, sway, -this.targetSize * 1.2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.translate(sway, -this.targetSize * 1.2);
+
+    // Petals
+    const pR = h * 0.55;
+    const cR = this.centerSize * ease;
+    for (let i = 0; i < this.petals; i++) {
+      const a = (i / this.petals) * TAU + t * 0.2;
+      const px = Math.cos(a) * pR * 0.45;
+      const py = Math.sin(a) * pR * 0.45;
+      const pCol = hsl2rgb((this.hue + i * 8) % 360, 85, 75);
+      const eCol = hsl2rgb((this.hue + 30) % 360, 90, 55);
+      const grad = ctx.createRadialGradient(px, py, 0, px, py, pR * 0.7);
+      grad.addColorStop(0, col(pCol.r, pCol.g, pCol.b, 0.95));
+      grad.addColorStop(1, col(eCol.r, eCol.g, eCol.b, 0.3));
+      ctx.fillStyle = grad;
+      ctx.shadowColor = `hsl(${this.hue},100%,70%)`;
+      ctx.shadowBlur = pR * 0.6;
+      ctx.beginPath();
+      ctx.ellipse(px, py, pR * 0.7, pR * 0.5, a, 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.shadowBlur = 0;
+
+    // Center
+    const cg = ctx.createRadialGradient(0, 0, 0, 0, 0, cR * 1.5);
+    cg.addColorStop(0, '#fff8d6');
+    cg.addColorStop(0.4, '#ffe082');
+    cg.addColorStop(1, '#ffb300');
+    ctx.fillStyle = cg;
+    ctx.shadowColor = '#ffeb3b';
+    ctx.shadowBlur = cR * 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, cR, 0, TAU);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+  }
+}
+
+function plantFlower(x, y) {
+  const f = new Flower(x, y);
+  flowers.push(f);
+  if (flowers.length > 50) flowers.shift();
+  plantCount++;
+  document.getElementById('count').textContent = plantCount;
+
+  // Burst at planting
+  emit({
+    x, y, n: 35, speed: 180, life: [0.3, 0.8], size: [1.5, 3.5],
+    hueR: [280, 380], sat: 90, lit: 75,
+    ring: true, drag: 0.94, grav: 40,
+  });
+
+  // Soft glow ring
+  emit({
+    x, y, n: 20, speed: 50, life: [0.5, 1.2], size: [2, 4],
+    hueR: [30, 60], sat: 100, lit: 80,
+    drag: 0.92,
+  });
+
+  return f;
+}
+
+// ── Cursor Sprites ─────────────────────────────────────────────────
+const trails = [];
+function spawnTrail(x, y) {
+  trails.push({ x, y, life: 0.7, max: 0.7, size: rnd(2, 4) * DPR });
+}
+
+// ── Floating Words ────────────────────────────────────────────────
+const words = ['magic', 'sparkle', 'wow', 'happy', 'love', 'shine', 'beautiful', 'dream', '✨', '⋆', '✧', '❋'];
+const floaters = [];
+function spawnWord(x, y) {
+  floaters.push({
+    x, y: y - 30 * DPR, tx: x + rnd(-40, 40), ty: y - 90 * DPR,
+    text: words[rndInt(0, words.length - 1)],
+    life: 1.5, max: 1.5,
+  });
+}
+
+// ── Input ─────────────────────────────────────────────────────────
+let plantCount = 0;
+let lastPlant = 0;
+const PLANT_CD = 0.25; // seconds between auto-plants on drag
+
+function atPos(e) {
+  const ev = e.touches ? e.touches[0] : e;
+  return { x: ev.clientX * DPR, y: ev.clientY * DPR };
+}
+
+function handleStart(e) {
+  if (intro.classList.contains('gone')) {
+    const p = atPos(e);
+    plantFlower(p.x, p.y);
+    emit({ x: p.x, y: p.y, n: 60, speed: 220, life: [0.2, 0.7], size: [1, 3], hueR: [320, 400], sat: 100, lit: 70, ring: true, drag: 0.94, grav: 50 });
+    spawnWord(p.x, p.y);
+    lastPlant = performance.now() / 1000;
+  }
+}
+
+function handleMove(e) {
+  if (!intro.classList.contains('gone')) return;
+  const now = performance.now() / 1000;
+  if (now - lastPlant < PLANT_CD) return;
+  const p = atPos(e);
+  // Don't spawn on every move, just a few
+  if (Math.random() > 0.4) return;
+  emit({ x: p.x, y: p.y, n: 6, speed: 80, life: [0.2, 0.4], size: [1, 2.5], hueR: [40, 70], sat: 100, lit: 85 });
+  spawnTrail(p.x, p.y);
+  lastPlant = now;
+}
+
+canvas.addEventListener('mousedown', handleStart);
+canvas.addEventListener('touchstart', handleStart, { passive: true });
+canvas.addEventListener('touchmove', handleMove, { passive: true });
+canvas.addEventListener('mousemove', handleMove);
+
+// ── Main Loop ──────────────────────────────────────────────────────
+const intro = document.getElementById('intro');
+const stats = document.getElementById('stats');
+let started = false;
+let last = performance.now();
+
+document.getElementById('begin').addEventListener('click', () => {
+  intro.classList.add('gone');
+  stats.classList.remove('hidden');
+  started = true;
+  initStars();
+  initFireflies();
+});
+
+function frame() {
+  const now = performance.now();
+  const dt = clamp((now - last) / 1000, 0, 0.05);
+  last = now;
+  const t = now / 1000;
+
+  ctx.globalAlpha = 1;
+
+  // Trail off previous frame
+  ctx.fillStyle = 'rgba(10,10,26,0.28)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Background sky gradient (drawn once-ish via fade)
+  if (started) {
+    drawStars(t);
+    updateFireflies(dt);
+    drawFireflies(t);
+  }
+
+  // Flowers
+  flowers.forEach(f => { f.step(dt, t); f.draw(t); });
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].step(dt);
+    particles[i].draw();
+    if (!particles[i].alive) particles.splice(i, 1);
+  }
+
+  // Trails
+  for (let i = trails.length - 1; i >= 0; i--) {
+    const tr = trails[i];
+    tr.life -= dt;
+    if (tr.life <= 0) { trails.splice(i, 1); continue; }
+    const a = tr.life / tr.max;
+    ctx.globalAlpha = a * 0.7;
+    ctx.fillStyle = '#ffe9a0';
+    ctx.shadowColor = '#ffe082';
+    ctx.shadowBlur = tr.size * 4 * a;
+    ctx.beginPath();
+    ctx.arc(tr.x, tr.y, tr.size, 0, TAU);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+
+  // Floating words
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.life -= dt;
+    if (f.life <= 0) { floaters.splice(i, 1); continue; }
+    f.x = lerp(f.x, f.tx, 3 * dt);
+    f.y = lerp(f.y, f.ty, 3 * dt);
+    const a = clamp(f.life / f.max, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(255,255,255,0.9)';
+    ctx.shadowBlur = 8;
+    ctx.font = `${14 * DPR|0}px "Cormorant Garamond",serif`;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+
+  requestAnimationFrame(frame);
+}
+
+frame();
+
+// On first frame (before start) just show a clean background
+// pre-draw gradient
+;(function initBg() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#05051a');
+  g.addColorStop(1, '#1a1a40');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+})();
+
+</script>
+</body>
+</html>
