@@ -68,6 +68,84 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
+// ── Ambient piano (theremin-like pad) ────────────────────────────
+const ambient = (() => {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  const master = ctx.createGain();
+  master.gain.value = 0;
+  master.connect(ctx.destination);
+
+  // Pentatonic blossom scale across several octaves
+  const NOTES = [261.6, 293.7, 329.6, 392.0, 440.0,
+                 523.2, 587.3, 659.2, 783.9, 880.0,
+                 1046, 1174, 1318];
+
+  function freq() { return NOTES[rndInt(0, NOTES.length - 1)]; }
+
+  function note(f, start, dur, type, vol) {
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    const lfo = ctx.createOscillator();
+    const lfoG = ctx.createGain();
+
+    o.type = type;
+    o.frequency.value = f;
+
+    lfo.frequency.value = rnd(3, 14);
+    lfoG.gain.value = rnd(2, 10);
+    lfo.connect(lfoG);
+    lfoG.connect(o.frequency);
+    lfo.start(start);
+
+    g.gain.setValueAtTime(0, start);
+    g.gain.linearRampToValueAtTime(vol, start + dur * 0.25);
+    g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+
+    o.connect(g);
+    g.connect(master);
+    o.start(start);
+    o.stop(start + dur + 0.05);
+  }
+
+  let started = false;
+  let loopTimer = null;
+
+  function step() {
+    const now = ctx.currentTime;
+    const in5 = now + 5;
+    const count = rndInt(2, 3);
+    for (let i = 0; i < count; i++) {
+      const t = now + i * rnd(1.4, 2.6);
+      const f = freq();
+      const dur = rnd(2.8, 4.5);
+      const type = Math.random() < 0.7 ? 'sine' : 'triangle';
+      const vol = rnd(0.003, 0.008);
+      note(f, t, dur, type, vol);
+      // soft harmony a fifth or octave up
+      if (Math.random() < 0.55) {
+        const harm = f * (Math.random() < 0.5 ? 1.5 : 2);
+        note(harm, t + rnd(0.1, 0.7), dur * rnd(0.7, 1.2), 'sine', vol * 0.5);
+      }
+    }
+    loopTimer = setTimeout(step, rnd(2500, 3800));
+  }
+
+  return {
+    start() {
+      if (started) return;
+      started = true;
+      step();
+      master.gain.linearRampToValueAtTime(0.9, ctx.currentTime + 3);
+    },
+    stop() {
+      started = false;
+      clearTimeout(loopTimer);
+      master.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.5);
+    }
+  };
+})();
+
 // ── Utilities ──────────────────────────────────────────────────────
 const TAU = Math.PI * 2;
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -197,6 +275,77 @@ function drawStars(t) {
   });
   ctx.shadowBlur = 0;
   ctx.globalAlpha = 1;
+}
+
+// ── Shooting stars ─────────────────────────────────────────────────
+const streaks = [];
+function spawnStreak() {
+  const fromTop = Math.random() < 0.5;
+  const x = rnd(0, W);
+  const y = fromTop ? rnd(0, H * 0.4) : rnd(0, H * 0.5);
+  const angle = rnd(Math.PI * 0.15, Math.PI * 0.85);
+  const speed = rnd(280, 520) * DPR;
+  const tail = rnd(120, 280) * DPR;
+  const life = rnd(0.55, 1.1);
+  streaks.push({
+    x, y,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
+    tail: Math.cos(angle) * tail,
+    head: Math.sin(angle) * tail,
+    life, max: life,
+    size: rnd(1.8, 3.2) * DPR,
+    hue: rnd(190, 260),
+  });
+}
+
+function updateStreaks(dt) {
+  for (let i = streaks.length - 1; i >= 0; i--) {
+    const s = streaks[i];
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    s.life -= dt;
+    if (s.life <= 0 || s.x < -200 || s.x > W + 200 || s.y > H + 200) {
+      streaks.splice(i, 1);
+    }
+  }
+}
+
+function drawStreaks() {
+  streaks.forEach(s => {
+    const fade = clamp(s.life / s.max, 0, 1);
+    const a = Math.pow(fade, 0.4);
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.strokeStyle = `hsl(${s.hue}, 60%, 88%)`;
+    ctx.shadowColor = `hsl(${s.hue}, 100%, 80%)`;
+    ctx.shadowBlur = s.size * 3;
+    ctx.lineWidth = s.size;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(s.x - s.tail, s.y - s.head);
+    ctx.lineTo(s.x, s.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size * 0.9, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  });
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+let streakAcc = 0;
+let streakFirst = true;
+function maybeStreak(dt) {
+  streakAcc += dt;
+  const wait = streakFirst ? rnd(0.8, 1.6) : rnd(5, 13);
+  if (streakAcc >= wait) {
+    streakAcc = 0;
+    streakFirst = false;
+    const burst = Math.random() < 0.35 ? rndInt(2, 4) : 1;
+    for (let i = 0; i < burst; i++) spawnStreak();
+  }
 }
 
 // ── Fireflies ──────────────────────────────────────────────────────
@@ -399,10 +548,10 @@ function handleMove(e) {
   lastPlant = now;
 }
 
-canvas.addEventListener('mousedown', handleStart);
-canvas.addEventListener('touchstart', handleStart, { passive: true });
-canvas.addEventListener('touchmove', handleMove, { passive: true });
-canvas.addEventListener('mousemove', handleMove);
+document.addEventListener('mousedown', handleStart);
+document.addEventListener('touchstart', handleStart, { passive: true });
+document.addEventListener('touchmove', handleMove, { passive: true });
+document.addEventListener('mousemove', handleMove);
 
 // ── Main Loop ──────────────────────────────────────────────────────
 const intro = document.getElementById('intro');
@@ -416,6 +565,7 @@ document.getElementById('begin').addEventListener('click', () => {
   started = true;
   initStars();
   initFireflies();
+  ambient.start();
 });
 
 function frame() {
@@ -433,6 +583,9 @@ function frame() {
   // Background sky gradient (drawn once-ish via fade)
   if (started) {
     drawStars(t);
+    updateStreaks(dt);
+    drawStreaks();
+    maybeStreak(dt);
     updateFireflies(dt);
     drawFireflies(t);
   }
